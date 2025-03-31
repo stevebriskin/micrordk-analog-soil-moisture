@@ -12,11 +12,14 @@ use micro_rdk::common::sensor::{
     TypedReadingsResult,
 };
 
+use micro_rdk::common::analog::AnalogReaderType;
+use micro_rdk::common::board::Board;
+
 use std::thread;
 use std::time;
 
 pub fn register_models(registry: &mut ComponentRegistry) -> Result<(), RegistryError> {
-    registry.register_sensor("soil_moisture", &SoilMoistureSensor::from_config)?;
+    registry.register_sensor("analog_soil_moisture", &SoilMoistureSensor::from_config)?;
     Ok(())
 }
 
@@ -24,6 +27,10 @@ pub fn register_models(registry: &mut ComponentRegistry) -> Result<(), RegistryE
 pub struct SoilMoistureSensor {
     reader: AnalogReaderType<u16>,
     num_readings: i32,
+
+    // calibration values
+    dry_value: i32,
+    wet_value: i32,
 }
 
 impl SoilMoistureSensor {
@@ -42,11 +49,16 @@ impl SoilMoistureSensor {
             ));
         }
 
+        let dry_value = cfg.get_attribute::<i32>("dry_value").unwrap_or(-1);
+        let wet_value = cfg.get_attribute::<i32>("wet_value").unwrap_or(-1);
+
         if let Ok(analog_reader_name) = cfg.get_attribute::<String>("analog_reader") {
             if let Ok(reader) = board_unwrapped.get_analog_reader_by_name(analog_reader_name) {
                 Ok(Arc::new(Mutex::new(Self {
                     reader,
                     num_readings,
+                    dry_value,
+                    wet_value,
                 })))
             } else {
                 Err(SensorError::ConfigError("failed to get analog reader"))
@@ -102,9 +114,27 @@ impl SensorT<f64> for SoilMoistureSensor {
         let median_reading = readings[mid];
 
         let mut results = HashMap::new();
-        results.insert("moisture_raw".to_string(), median_reading as f64);
+        results.insert("milliv".to_string(), median_reading as f64);
         results.insert("num_readings".to_string(), readings.len() as f64); // Number of readings taken for debugging
+
+        if self.dry_value > 0 && self.wet_value > 0 && self.dry_value != self.wet_value {
+            // map median_reading to a linear scale between 0 and 100 based on dry and wet values
+            results.insert(
+                "moisture_mapped".to_string(),
+                map_value(
+                    median_reading as f32,
+                    self.wet_value as f32,
+                    self.dry_value as f32,
+                    100.0,
+                    0.0,
+                ) as f64,
+            );
+        }
 
         Ok(results)
     }
+}
+fn map_value(x: f32, in_min: f32, in_max: f32, out_min: f32, out_max: f32) -> f32 {
+    let mapped = (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+    mapped.clamp(f32::min(out_min, out_max), f32::max(out_min, out_max))
 }
